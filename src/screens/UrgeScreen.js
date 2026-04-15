@@ -1,196 +1,202 @@
-import React, { useState, useEffect } from 'react';
-import { View, Text, StyleSheet, SafeAreaView } from 'react-native';
-import Animated, {
-  useSharedValue,
-  useAnimatedStyle,
-  withTiming,
-  withRepeat,
-  withSpring,
-} from 'react-native-reanimated';
+import React, { useCallback, useRef, useState } from 'react';
+import { Alert, StyleSheet, Text, View } from 'react-native';
 import * as Haptics from 'expo-haptics';
-import GlassAction from '../components/GlassAction';
-import { COLORS, SPACING, RADIUS, TYPOGRAPHY } from '../utils/theme';
+import { AppScreen } from '../components/ui/AppScreen';
+import { PrimaryButton } from '../components/ui/PrimaryButton';
+import { CompletionCard } from '../features/urge/components/CompletionCard';
+import { CountdownDial } from '../features/urge/components/CountdownDial';
+import { CopingActionList } from '../features/urge/components/CopingActionList';
+import { MessageCarousel } from '../features/urge/components/MessageCarousel';
+import { TriggerChips } from '../features/urge/components/TriggerChips';
+import {
+  COPING_ACTIONS,
+  URGE_DURATION_SECONDS,
+  URGE_MESSAGES,
+  URGE_TRIGGERS,
+} from '../features/urge/constants';
+import { resetStreak, saveUrgeLog } from '../storage/storage';
+import { colors, spacing, typography } from '../theme';
 
-const MESSAGES = [
-  'You are chasing losses.',
-  'This urge will pass.',
-  'You are stronger.',
-  'Pause. Breathe. Think.',
-];
+export default function UrgeScreen({ onClose }) {
+  const [phase, setPhase] = useState('active');
+  const [selectedTrigger, setSelectedTrigger] = useState(null);
+  const hasLoggedOutcomeRef = useRef(false);
 
-export default function UrgeScreen({ navigation }) {
-  const [timeLeft, setTimeLeft] = useState(600); // 10 minutes
-  const [messageIdx, setMessageIdx] = useState(0);
-  const [done, setDone] = useState(false);
+  const persistOutcome = useCallback(
+    async (outcome) => {
+      if (hasLoggedOutcomeRef.current) {
+        return true;
+      }
 
-  // Animations
-  const containerOpacity = useSharedValue(0);
-  const timerScale = useSharedValue(1);
-  const doneScale = useSharedValue(0.5);
+      try {
+        hasLoggedOutcomeRef.current = true;
 
-  useEffect(() => {
-    // Fade in
-    containerOpacity.value = withTiming(1, { duration: 400 });
+        await saveUrgeLog({
+          intensity: outcome === 'relapsed' ? 8 : 5,
+          outcome,
+          trigger: selectedTrigger || 'other',
+        });
 
-    // Breathing timer animation
-    timerScale.value = withRepeat(
-      withTiming(1.05, { duration: 1200 }),
-      -1,
-      true
+        if (outcome === 'relapsed') {
+          await resetStreak();
+        }
+
+        return true;
+      } catch (error) {
+        hasLoggedOutcomeRef.current = false;
+        console.warn('persistOutcome error', error);
+        Alert.alert(
+          'Unable to save this session',
+          'Your progress could not be saved right now. Please try again before leaving this screen.'
+        );
+        return false;
+      }
+    },
+    [selectedTrigger]
+  );
+
+  const handleTimerComplete = useCallback(async () => {
+    const saved = await persistOutcome('resisted');
+    if (!saved) {
+      return;
+    }
+
+    Haptics.notificationAsync(
+      Haptics.NotificationFeedbackType.Success
+    ).catch(() => {});
+    setPhase('complete');
+  }, [persistOutcome]);
+
+  const handleActionPress = useCallback(() => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+  }, []);
+
+  const handleSelectTrigger = useCallback((nextTrigger) => {
+    setSelectedTrigger((current) =>
+      current === nextTrigger ? null : nextTrigger
     );
   }, []);
 
-  useEffect(() => {
-    if (done || timeLeft <= 0) return;
-    const timer = setInterval(() => {
-      setTimeLeft(t => {
-        if (t <= 1) {
-          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
-          setDone(true);
-          doneScale.value = withSpring(1);
-          return 0;
-        }
-        return t - 1;
-      });
-    }, 1000);
-    return () => clearInterval(timer);
-  }, [done, timeLeft]);
+  const handleDismiss = useCallback(() => {
+    onClose?.();
+  }, [onClose]);
 
-  const minutes = Math.floor(timeLeft / 60);
-  const seconds = timeLeft % 60;
-  const timeStr = `${minutes}:${seconds.toString().padStart(2, '0')}`;
-  const message = MESSAGES[messageIdx % MESSAGES.length];
+  const closeWithOutcome = useCallback(
+    async (outcome) => {
+      const saved = await persistOutcome(outcome);
+      if (saved) {
+        onClose?.();
+      }
+    },
+    [onClose, persistOutcome]
+  );
 
-  const containerAnim = useAnimatedStyle(() => ({
-    opacity: containerOpacity.value,
-  }));
-
-  const timerAnim = useAnimatedStyle(() => ({
-    transform: [{ scale: timerScale.value }],
-  }));
-
-  const doneAnim = useAnimatedStyle(() => ({
-    transform: [{ scale: doneScale.value }],
-    opacity: containerOpacity.value,
-  }));
-
-  if (done) {
-    return (
-      <SafeAreaView style={styles.container}>
-        {/* Background depth effect */}
-        <View style={StyleSheet.absoluteFillObject}>
-          <View style={styles.depthBg} />
-        </View>
-
-        <Animated.View style={[styles.doneContent, doneAnim]}>
-          <Text style={styles.doneEmoji}>✓</Text>
-          <Text style={styles.doneTitle}>You made it</Text>
-          <Text style={styles.doneSub}>The urge passed.</Text>
-        </Animated.View>
-      </SafeAreaView>
+  const handleLeavePress = useCallback(() => {
+    Alert.alert(
+      'End this session?',
+      'Choose the outcome that fits this moment so your stats stay accurate.',
+      [
+        { text: 'Keep going', style: 'cancel' },
+        {
+          text: 'I resisted',
+          onPress: () => {
+            closeWithOutcome('resisted');
+          },
+        },
+        {
+          text: 'I gambled',
+          style: 'destructive',
+          onPress: () => {
+            closeWithOutcome('relapsed');
+          },
+        },
+      ]
     );
-  }
+  }, [closeWithOutcome]);
 
   return (
-    <SafeAreaView style={styles.container}>
-      {/* Background depth effect */}
-      <View style={StyleSheet.absoluteFillObject}>
-        <View style={styles.depthBg} />
-      </View>
-
-      <Animated.View style={[styles.content, containerAnim]}>
-        {/* Timer */}
-        <Animated.Text style={[styles.timer, timerAnim]}>
-          {timeStr}
-        </Animated.Text>
-
-        {/* Message */}
-        <Text style={styles.message}>{message}</Text>
-
-        {/* Actions */}
-        <View style={styles.actions}>
-          <GlassAction
-            text="Drink Water"
-            onPress={() => setMessageIdx(idx => idx + 1)}
-          />
-          <GlassAction
-            text="Walk"
-            onPress={() => setMessageIdx(idx => idx + 1)}
-          />
+    <AppScreen contentContainerStyle={styles.container} scrollable>
+      <View style={styles.inner}>
+        <View>
+          <Text style={styles.eyebrow}>Intervention</Text>
+          <Text style={styles.title}>Stay here until the spike drops.</Text>
+          <Text style={styles.subtitle}>
+            The timer and the messages update in isolated components, so the screen stays smooth while the urge fades.
+          </Text>
         </View>
 
-        {/* Close hint */}
-        <Text style={styles.closeHint}>Tap timer to close</Text>
-      </Animated.View>
-    </SafeAreaView>
+        {phase === 'complete' ? (
+          <CompletionCard onClose={handleDismiss} />
+        ) : (
+          <>
+            <CountdownDial
+              durationSeconds={URGE_DURATION_SECONDS}
+              onComplete={handleTimerComplete}
+            />
+
+            <View style={styles.section}>
+              <Text style={styles.sectionLabel}>What triggered this?</Text>
+              <TriggerChips
+                onSelect={handleSelectTrigger}
+                options={URGE_TRIGGERS}
+                selectedId={selectedTrigger}
+              />
+            </View>
+
+            <MessageCarousel messages={URGE_MESSAGES} />
+
+            <View style={styles.section}>
+              <Text style={styles.sectionLabel}>Fast grounding actions</Text>
+              <CopingActionList actions={COPING_ACTIONS} onPress={handleActionPress} />
+            </View>
+
+            <PrimaryButton
+              onPress={handleLeavePress}
+              style={styles.leaveButton}
+              subtitle="Log the outcome and exit"
+              title="End this session"
+              tone="ghost"
+            />
+          </>
+        )}
+      </View>
+    </AppScreen>
   );
 }
 
-// ─── Styles ──────────────────────────────────────────────────────────────────
-
 const styles = StyleSheet.create({
   container: {
-    flex: 1,
-    backgroundColor: COLORS.background,
-    justifyContent: 'center',
-    paddingHorizontal: SPACING.lg,
+    flexGrow: 1,
+    paddingTop: spacing.xl,
   },
-
-  depthBg: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(255,255,255,0.02)',
+  inner: {
+    flexGrow: 1,
   },
-
-  content: {
-    alignItems: 'center',
-    zIndex: 10,
+  eyebrow: {
+    ...typography.eyebrow,
+    color: colors.accent,
+    marginBottom: spacing.sm,
   },
-
-  timer: {
-    ...TYPOGRAPHY.timer,
-    color: COLORS.danger,
-    marginBottom: SPACING.xxl,
+  title: {
+    ...typography.largeTitle,
+    color: colors.textPrimary,
   },
-
-  message: {
-    ...TYPOGRAPHY.title,
-    color: COLORS.text,
-    textAlign: 'center',
-    marginBottom: SPACING.xxl,
-    maxWidth: 280,
+  subtitle: {
+    ...typography.body,
+    color: colors.textSecondary,
+    marginTop: spacing.sm,
+    marginBottom: spacing.xl,
   },
-
-  actions: {
-    flexDirection: 'row',
-    marginBottom: SPACING.xxxl,
+  section: {
+    marginTop: spacing.lg,
   },
-
-  closeHint: {
-    ...TYPOGRAPHY.caption,
-    color: COLORS.subtext,
-    marginTop: SPACING.xl,
+  sectionLabel: {
+    ...typography.eyebrow,
+    color: colors.textTertiary,
+    marginBottom: spacing.sm,
   },
-
-  // Done state
-  doneContent: {
-    alignItems: 'center',
-    zIndex: 10,
-  },
-
-  doneEmoji: {
-    fontSize: 80,
-    marginBottom: SPACING.lg,
-  },
-
-  doneTitle: {
-    ...TYPOGRAPHY.largeTitle,
-    color: COLORS.text,
-    marginBottom: SPACING.xs,
-  },
-
-  doneSub: {
-    ...TYPOGRAPHY.body,
-    color: COLORS.subtext,
-    marginBottom: SPACING.xxl,
+  leaveButton: {
+    marginTop: spacing.lg,
+    marginBottom: spacing.xl,
   },
 });

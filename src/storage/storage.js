@@ -1,98 +1,105 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const KEYS = {
-  STREAK_START:  'fg_streak_start',
-  URGE_LOGS:     'fg_urge_logs',
-  DAILY_SAVINGS: 'fg_daily_savings', // amount saved per day
+  STREAK_START: 'fg_streak_start',
+  URGE_LOGS: 'fg_urge_logs',
+  DAILY_SAVINGS: 'fg_daily_savings',
 };
 
-// ─── Streak ────────────────────────────────────────────────────────────────
+const DEFAULT_DAILY_SAVINGS = 500;
+const STORAGE_RETRY_DELAYS_MS = [0, 120, 300];
 
-/**
- * Returns streak start date string (ISO) or null if never set.
- */
+function delay(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+async function retryStorageWrite(operationName, operation) {
+  let lastError = null;
+
+  for (const waitMs of STORAGE_RETRY_DELAYS_MS) {
+    try {
+      if (waitMs > 0) {
+        await delay(waitMs);
+      }
+
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      console.warn(`${operationName} attempt failed`, error);
+    }
+  }
+
+  throw new Error(
+    `${operationName} failed after ${STORAGE_RETRY_DELAYS_MS.length} attempts: ${String(
+      lastError?.message || lastError
+    )}`
+  );
+}
+
 export async function getStreakStart() {
   try {
-    const val = await AsyncStorage.getItem(KEYS.STREAK_START);
-    return val; // ISO string or null
-  } catch {
+    return await AsyncStorage.getItem(KEYS.STREAK_START);
+  } catch (error) {
+    console.warn('getStreakStart error', error);
     return null;
   }
 }
 
-/**
- * Resets streak to today (used on new start or relapse).
- */
 export async function resetStreak() {
-  try {
+  return retryStorageWrite('resetStreak', async () => {
     await AsyncStorage.setItem(KEYS.STREAK_START, new Date().toISOString());
-  } catch (e) {
-    console.warn('resetStreak error', e);
-  }
+    return true;
+  });
 }
 
-/**
- * Returns number of full days since streak start, or 0.
- */
 export async function getStreakDays() {
   try {
     const start = await getStreakStart();
-    if (!start) return 0;
+    if (!start) {
+      return 0;
+    }
+
     const startDate = new Date(start);
     const now = new Date();
     const diffMs = now - startDate;
     return Math.floor(diffMs / (1000 * 60 * 60 * 24));
-  } catch {
+  } catch (error) {
+    console.warn('getStreakDays error', error);
     return 0;
   }
 }
 
-// ─── Savings ───────────────────────────────────────────────────────────────
-
-/**
- * Returns daily savings amount in PHP (default 500).
- */
 export async function getDailySavings() {
   try {
-    const val = await AsyncStorage.getItem(KEYS.DAILY_SAVINGS);
-    return val ? parseFloat(val) : 500;
-  } catch {
-    return 500;
+    const value = await AsyncStorage.getItem(KEYS.DAILY_SAVINGS);
+    return value ? Number.parseFloat(value) : DEFAULT_DAILY_SAVINGS;
+  } catch (error) {
+    console.warn('getDailySavings error', error);
+    return DEFAULT_DAILY_SAVINGS;
   }
 }
 
 export async function setDailySavings(amount) {
-  try {
+  return retryStorageWrite('setDailySavings', async () => {
     await AsyncStorage.setItem(KEYS.DAILY_SAVINGS, String(amount));
-  } catch (e) {
-    console.warn('setDailySavings error', e);
-  }
+    return true;
+  });
 }
 
-// ─── Urge Logs ─────────────────────────────────────────────────────────────
-
-/**
- * Log shape:
- * {
- *   id: string,
- *   timestamp: ISO string,
- *   intensity: number (1–10),
- *   trigger: string,
- *   outcome: 'resisted' | 'relapsed',
- *   hour: number (0–23),
- * }
- */
 export async function getUrgeLogs() {
   try {
     const raw = await AsyncStorage.getItem(KEYS.URGE_LOGS);
     return raw ? JSON.parse(raw) : [];
-  } catch {
+  } catch (error) {
+    console.warn('getUrgeLogs error', error);
     return [];
   }
 }
 
 export async function saveUrgeLog(log) {
-  try {
+  return retryStorageWrite('saveUrgeLog', async () => {
     const logs = await getUrgeLogs();
     const newLog = {
       id: Date.now().toString(),
@@ -100,54 +107,59 @@ export async function saveUrgeLog(log) {
       hour: new Date().getHours(),
       ...log,
     };
-    const updated = [newLog, ...logs];
-    await AsyncStorage.setItem(KEYS.URGE_LOGS, JSON.stringify(updated));
+    const updatedLogs = [newLog, ...logs];
+    await AsyncStorage.setItem(KEYS.URGE_LOGS, JSON.stringify(updatedLogs));
     return newLog;
-  } catch (e) {
-    console.warn('saveUrgeLog error', e);
-    return null;
-  }
+  });
 }
 
 export async function clearAllData() {
-  try {
+  return retryStorageWrite('clearAllData', async () => {
     await AsyncStorage.multiRemove([
       KEYS.STREAK_START,
       KEYS.URGE_LOGS,
       KEYS.DAILY_SAVINGS,
     ]);
-  } catch (e) {
-    console.warn('clearAllData error', e);
-  }
+    return true;
+  });
 }
 
-// ─── Stats helpers ─────────────────────────────────────────────────────────
-
-/**
- * Returns the most common trigger from logs.
- */
 export function getMostFrequentTrigger(logs) {
-  if (!logs.length) return null;
+  if (!logs.length) {
+    return null;
+  }
+
   const counts = {};
-  logs.forEach((l) => {
-    if (l.trigger) counts[l.trigger] = (counts[l.trigger] || 0) + 1;
+  logs.forEach((log) => {
+    if (log.trigger) {
+      counts[log.trigger] = (counts[log.trigger] || 0) + 1;
+    }
   });
-  return Object.entries(counts).sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
+
+  return Object.entries(counts).sort((left, right) => right[1] - left[1])[0]?.[0] ?? null;
 }
 
-/**
- * Returns the most common hour urges are logged.
- */
 export function getPeakUrgeHour(logs) {
-  if (!logs.length) return null;
+  if (!logs.length) {
+    return null;
+  }
+
   const counts = {};
-  logs.forEach((l) => {
-    if (l.hour !== undefined) counts[l.hour] = (counts[l.hour] || 0) + 1;
+  logs.forEach((log) => {
+    if (log.hour !== undefined) {
+      counts[log.hour] = (counts[log.hour] || 0) + 1;
+    }
   });
-  const hour = Object.entries(counts).sort((a, b) => b[1] - a[1])[0]?.[0];
-  if (hour === undefined) return null;
-  const h = parseInt(hour);
-  const suffix = h >= 12 ? 'PM' : 'AM';
-  const display = h === 0 ? 12 : h > 12 ? h - 12 : h;
-  return `${display}:00 ${suffix}`;
+
+  const hour = Object.entries(counts).sort((left, right) => right[1] - left[1])[0]?.[0];
+  if (hour === undefined) {
+    return null;
+  }
+
+  const numericHour = Number.parseInt(hour, 10);
+  const suffix = numericHour >= 12 ? 'PM' : 'AM';
+  const displayHour =
+    numericHour === 0 ? 12 : numericHour > 12 ? numericHour - 12 : numericHour;
+
+  return `${displayHour}:00 ${suffix}`;
 }
